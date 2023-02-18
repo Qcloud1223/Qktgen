@@ -62,13 +62,32 @@ void main_send_loop(struct traffic_config *t_conf)
     struct rte_mbuf *pkt_burst[32];
     uint16_t port_id = 0;
     uint16_t queue_id = 0;
+
+    uint64_t prev_tsc, curr_tsc;
+    uint64_t tsc_hz = rte_get_tsc_hz();
+    prev_tsc = rte_rdtsc();
+
+    static uint64_t prof_pps, prof_bps;
     while (!force_quit)
     {
         uint16_t nb_gen = pktgen(t_conf, pkt_burst, 32);
         if (nb_gen == 0)
             continue;
         uint16_t nb_tx  = rte_eth_tx_burst(port_id, queue_id, pkt_burst, nb_gen);
-        // TODO: profile
+        prof_pps += nb_tx;
+        for(int i = 0; i < nb_tx; i++) {
+            prof_bps += rte_pktmbuf_pkt_len(pkt_burst[i]) * 8;
+        }
+
+        // TODO: move to another core since printf might cause jitter in tx core
+        curr_tsc = rte_rdtsc();
+        if (unlikely((curr_tsc - prev_tsc) > tsc_hz * 1)) {
+            double interval = (double)1 * (curr_tsc - prev_tsc) / tsc_hz;
+            printf("Core #%d: %fMpps, %fMbps\n", rte_lcore_id(), (double)prof_pps / interval / 1e6, (double)prof_bps / interval / 1e6);
+            prof_pps = 0;
+            prof_bps = 0;
+            prev_tsc = curr_tsc;
+        }
     }
     
 }
