@@ -2,6 +2,51 @@
 
 // #include <iostream>
 #include <random>
+#include <unordered_map>
+#include <boost/functional/hash.hpp>
+
+struct five_tuple
+{
+    uint32_t sip;
+    uint32_t dip;
+    uint16_t sport;
+    uint16_t dport;
+    uint8_t proto;
+
+    bool operator==(const five_tuple &other) const{
+        return (sip == other.sip &&
+                dip == other.dip &&
+                sport == other.sport &&
+                dport == other.dport &&
+                proto == other.proto);
+    }
+    void operator=(const five_tuple &other)
+    {
+        this->sip = other.sip;
+        this->dip = other.dip;
+        this->sport = other.sport;
+        this->dport = other.dport;
+        this->proto = other.proto;
+    }
+};
+
+template<>
+struct std::hash<five_tuple>
+{
+    std::size_t operator()(five_tuple const &ft) const noexcept
+    {
+        std::size_t seed = 0;
+        boost::hash_combine(seed, ft.sip);
+        boost::hash_combine(seed, ft.dip);
+        boost::hash_combine(seed, ft.sport);
+        boost::hash_combine(seed, ft.dport);
+        boost::hash_combine(seed, ft.proto);
+
+        return seed;
+    }
+};
+
+std::unordered_map<five_tuple, uint32_t> flow_seq;
 
 static void fill_packet(struct rte_mbuf *pkt, struct pkt_config *p_conf)
 {
@@ -56,7 +101,23 @@ static void fill_packet(struct rte_mbuf *pkt, struct pkt_config *p_conf)
                 // offload
                 pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM;
 
-                // TODO: a minimalist protocol stack, e.g., window size, sequence number   
+                // TODO: check if this hurt performance much  
+                five_tuple ft;
+                ft.sip = p_conf->sip;
+                ft.dip = p_conf->dip;
+                ft.sport = p_conf->sport;
+                ft.dport = p_conf->dport;
+                ft.proto = p_conf->proto;
+
+                std::unordered_map<five_tuple, uint32_t>::iterator res;
+                if ((res = flow_seq.find(ft)) == flow_seq.end()) {
+                    tcp_hdr->sent_seq = rte_cpu_to_be_32(0x012345678);
+                    flow_seq.insert(std::make_pair(ft, 0x012345678));
+                }
+                else {
+                    (*res).second += p_len;
+                    tcp_hdr->sent_seq = rte_cpu_to_be_32((*res).second);
+                }
                 break;
             }
         
