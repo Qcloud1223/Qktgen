@@ -11,5 +11,5 @@ add_executable(Qktgen
     src/Qktgen.h
 )
 target_include_directories(Qktgen PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(Qktgen PRIVATE PkgConfig::DPDK)
+target_link_libraries(Qktgen PRIVATE PkgConfig::DPDK pcap)
 target_link_options(Qktgen PRIVATE -Wl,--no-as-needed -L/usr/local/lib64 -lrte_net_ixgbe -lrte_mempool_ring)

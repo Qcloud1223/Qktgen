@@ -45,7 +45,8 @@ void init_dpdk()
     int ret = 0;
     // TODO: unsymmetric RX/TX config
     // TODO: check main/worker or RTC
-    unsigned queue_count = rte_lcore_count();
+    // Currently, we only rx/tx on one core 
+    unsigned queue_count = 1;
     ret = rte_eth_dev_configure(curr_port, queue_count, queue_count, &port_conf);
     if (ret < 0) {
         exit(-1);
@@ -68,7 +69,7 @@ void init_dpdk()
         }
     }
     for (int q = 0; q < queue_count; q++) {
-        ret = rte_eth_tx_queue_setup(curr_port, q, rx_desc, rte_eth_dev_socket_id(curr_port), &txq_conf);
+        ret = rte_eth_tx_queue_setup(curr_port, q, tx_desc, rte_eth_dev_socket_id(curr_port), &txq_conf);
         if (ret < 0) {
             exit(-1);
         }

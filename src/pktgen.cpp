@@ -4,6 +4,7 @@
 #include <random>
 #include <unordered_map>
 #include <boost/functional/hash.hpp>
+#include <algorithm>
 
 struct five_tuple
 {
@@ -198,4 +199,10 @@ uint32_t pktgen(struct traffic_config *t_conf, struct rte_mbuf **burst, uint16_t
     }
 
     return burst_size;
+}
+
+void sort_packets(struct rte_mbuf **buf, uint32_t len, enum flow_aggregation_pattern p)
+{
+    
+    return;
 }

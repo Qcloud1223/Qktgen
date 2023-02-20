@@ -1,6 +1,11 @@
 #ifndef QKTGEN_HEADER
 #define QKTGEN_HEADER
 
+// for u_char in pcap.h
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,11 +14,13 @@
 #include <stdint.h>
 #include <netinet/in.h>
 #include <signal.h>
+#include <pcap.h>
 
 #include <rte_ethdev.h>
 #include <rte_common.h>
 #include <rte_ether.h>
 #include <rte_mempool.h>
+#include <rte_cycles.h>
 
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
@@ -36,7 +43,7 @@ struct pkt_config
     uint8_t proto;
 };
 
-enum {
+enum flow_aggregation_pattern {
     FLOW_AGGREGATE_NONE,
     FLOW_AGGREGATE_SOURCE,
     FLOW_AGGREGATE_DEST,
@@ -56,7 +63,7 @@ struct traffic_config
     uint16_t sport_l, sport_h, dport_l, dport_h;
     uint8_t proto;
 
-    uint8_t flow_aggregate;
+    enum flow_aggregation_pattern pattern;
     /* flow aggregation needs a buffer time, i.e. max time for sorting
        For example, if the traffic comes in 5M pps, and buffer for 100us,
        then we ensure every 500 packets are aggregated by certain field. 
@@ -67,6 +74,9 @@ struct traffic_config
        */
     uint16_t buffer_time;
     uint64_t seed;
+
+    pcap_t *handle;
+    uint16_t buffer_number;
 };
 
 struct flow_config
@@ -80,6 +90,7 @@ int force_quit;
 void init_dpdk();
 uint32_t pktgen(struct traffic_config *, struct rte_mbuf **, uint16_t);
 uint16_t do_tx(struct traffic_config *, uint16_t, uint16_t, struct rte_mbuf **, uint16_t);
+void sort_packets(struct rte_mbuf **buf, uint32_t len, enum flow_aggregation_pattern p);
 
 #ifdef __cplusplus
 }
