@@ -31,16 +31,24 @@ struct five_tuple
     }
 };
 
+/* careful hashing the five tuple */
 template<>
 struct std::hash<five_tuple>
 {
     std::size_t operator()(five_tuple const &ft) const noexcept
     {
         std::size_t seed = 0;
-        boost::hash_combine(seed, ft.sip);
-        boost::hash_combine(seed, ft.dip);
-        boost::hash_combine(seed, ft.sport);
-        boost::hash_combine(seed, ft.dport);
+        if (ft.sip < ft.dip) {
+            boost::hash_combine(seed, ft.dip);
+            boost::hash_combine(seed, ft.sip);
+            boost::hash_combine(seed, ft.dport);
+            boost::hash_combine(seed, ft.sport);
+        } else {
+            boost::hash_combine(seed, ft.sip);
+            boost::hash_combine(seed, ft.dip);
+            boost::hash_combine(seed, ft.sport);
+            boost::hash_combine(seed, ft.dport);
+        }
         boost::hash_combine(seed, ft.proto);
 
         return seed;
@@ -201,8 +209,48 @@ uint32_t pktgen(struct traffic_config *t_conf, struct rte_mbuf **burst, uint16_t
     return burst_size;
 }
 
+static int cmp_mbuf(const void *a, const void *b)
+{
+    struct rte_mbuf **a_mbuf = (struct rte_mbuf **)a;
+    struct rte_mbuf **b_mbuf = (struct rte_mbuf **)b;
+    struct rte_ipv4_hdr *a_hdr = rte_pktmbuf_mtod_offset(*a_mbuf, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+    struct rte_ipv4_hdr *b_hdr = rte_pktmbuf_mtod_offset(*b_mbuf, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+    // TODO: udp support
+    struct rte_tcp_hdr *a_tcp =  (struct rte_tcp_hdr *)((char *)a_hdr + sizeof(struct rte_ipv4_hdr));
+    struct rte_tcp_hdr *b_tcp =  (struct rte_tcp_hdr *)((char *)b_hdr + sizeof(struct rte_ipv4_hdr));
+
+    five_tuple a_ft, b_ft;
+
+    a_ft.sip = a_hdr->src_addr;
+    a_ft.dip = a_hdr->dst_addr;
+    a_ft.sport = a_tcp->src_port;
+    a_ft.dport = a_tcp->dst_port;
+    a_ft.proto = a_hdr->next_proto_id;
+    
+    b_ft.sip = b_hdr->src_addr;
+    b_ft.dip = b_hdr->dst_addr;
+    b_ft.sport = b_tcp->src_port;
+    b_ft.dport = b_tcp->dst_port;
+    b_ft.proto = b_hdr->next_proto_id;
+
+    /* elements will be quite likely the same, so we first check that */
+    std::size_t a_hash = std::hash<five_tuple>{}(a_ft);
+    std::size_t b_hash = std::hash<five_tuple>{}(b_ft);
+    
+    // if ((a_ft.sip == b_ft.dip) && (a_ft.sport == b_ft.dport)){
+    //     return 0;
+    // }
+
+    if (a_hash == b_hash)
+        return 0;
+    else if (a_hash < b_hash)
+        return -1;
+    else
+        return 1;
+} 
+
 void sort_packets(struct rte_mbuf **buf, uint32_t len, enum flow_aggregation_pattern p)
 {
-    
+    // std::qsort(buf, len, sizeof(struct rte_mbuf *), cmp_mbuf);
     return;
 }
