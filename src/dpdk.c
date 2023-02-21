@@ -10,6 +10,7 @@ struct rte_eth_conf port_conf = {
     .txmode = {.mq_mode = ETH_MQ_TX_NONE}
 };
 
+#define MAX_BUFFER_SIZE 32
 void init_dpdk()
 {
     // check available ports
@@ -53,8 +54,8 @@ void init_dpdk()
     }
 
     // setup RX/TX queue
-    unsigned rx_desc = 1024;
-    unsigned tx_desc = 1024;
+    unsigned rx_desc = 2048;
+    unsigned tx_desc = 2048;
     struct rte_eth_rxconf rxq_conf;
     struct rte_eth_txconf txq_conf;
     rxq_conf = info.default_rxconf;
@@ -73,6 +74,18 @@ void init_dpdk()
         if (ret < 0) {
             exit(-1);
         }
+    }
+
+    /* TX buffer */
+    tx_buffer = rte_zmalloc_socket("send_buffer", RTE_ETH_TX_BUFFER_SIZE(MAX_BUFFER_SIZE), 0, rte_eth_dev_socket_id(0));
+    if (tx_buffer == NULL) {
+        exit(-1);
+    }
+    rte_eth_tx_buffer_init(tx_buffer, MAX_BUFFER_SIZE);
+    ret = rte_eth_tx_buffer_set_err_callback(tx_buffer, rte_eth_tx_buffer_count_callback,
+        &packet_dropped);
+    if (ret < 0) {
+        exit(-1);
     }
 
     ret = rte_eth_promiscuous_enable(curr_port);

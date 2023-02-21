@@ -251,6 +251,6 @@ static int cmp_mbuf(const void *a, const void *b)
 
 void sort_packets(struct rte_mbuf **buf, uint32_t len, enum flow_aggregation_pattern p)
 {
-    // std::qsort(buf, len, sizeof(struct rte_mbuf *), cmp_mbuf);
+    std::qsort(buf, len, sizeof(struct rte_mbuf *), cmp_mbuf);
     return;
 }

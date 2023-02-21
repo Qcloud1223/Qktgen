@@ -64,6 +64,21 @@ void parse_arg(int argc, char *argv[])
     }
 }
 
+/* convert an mbuf to readable packet,
+   which is extremely useful when debugging */
+static void debug_print(struct rte_mbuf *pkt)
+{
+    struct rte_ipv4_hdr *ip_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+    struct rte_tcp_hdr *tcp_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_tcp_hdr *, sizeof(struct rte_ether_hdr) + sizeof(struct rte_ipv4_hdr));
+
+    char ip_p[INET_ADDRSTRLEN];
+    printf("sip: %s, ", inet_ntop(AF_INET, &ip_hdr->src_addr, ip_p, INET_ADDRSTRLEN));
+    fflush(stdout);
+    printf("dip: %s, ", inet_ntop(AF_INET, &ip_hdr->dst_addr, ip_p, INET_ADDRSTRLEN));
+    fflush(stdout);
+    printf("sport: %u, dport: %u, length: %u\n", rte_cpu_to_be_16(tcp_hdr->src_port), rte_cpu_to_be_16(tcp_hdr->dst_port), pkt->data_len);
+}
+
 // TODO: check if this is large enough to prevent overflow
 #define SEND_BUF_SIZE (8*1024)
 static struct rte_mbuf *send_buf[SEND_BUF_SIZE];
@@ -136,15 +151,25 @@ static void sender_loop()
         uint16_t nb_tx = 0;
         if (real_idx + real_send_size <= SEND_BUF_SIZE) {
             nb_tx = rte_eth_tx_burst(port_id, queue_id, send_buf + real_idx, real_send_size);
-            if (unlikely(nb_tx == 0)) {
-                printf("port cannot TX, corrupted queue?\n");
-                printf("stats: last_tx: %lu, finish_idx: %lu, gap: %lu, real_idx: %u, real_send_size:%u\n",
-                    last_tx, finish_idx, gap, real_idx, real_send_size);
-                printf("faulty mbuf pointers:\n");
-                for (int i = 0; i < real_send_size; i++){
-                    printf("%p, pkt_len: %u\n", *(send_buf + real_idx + i), send_buf[real_idx + i]->pkt_len);
-                }
-                exit(-1);
+            if (unlikely(nb_tx != real_send_size)) {
+                /* The CPU would send much faster than the NIC when it's slow (e.g., 10G)
+                   Therefore, sometimes the tx queue is full and the sender should wait for it,
+                   since we don't want to drop any packet.
+                   This happens when the worker has prepared a whole lot of packets
+                   before the sender can start. When the sender starts sending,
+                   it will immediately take up the whole tx queue.
+                   This branch will never be executed under 100G NIC but very frequently under 10G one,
+                   yet both of them are resolved when the worker becomes bottleneck. */
+                
+                // printf("port cannot TX, full queue?\n");
+                // printf("stats: last_tx: %lu, finish_idx: %lu, gap: %lu, real_idx: %u, real_send_size:%u, actually sent: %u\n",
+                //     last_tx, finish_idx, gap, real_idx, real_send_size, nb_tx);
+                // printf("faulty mbuf pointers:\n");
+                // for (int i = 0; i < real_send_size; i++){
+                //     printf("%p, pkt_len: %u\n", *(send_buf + real_idx + i), send_buf[real_idx + i]->pkt_len);
+                // }
+                // exit(-1);
+                rte_delay_us_block(160);
             }
             for(int i = 0; i < nb_tx; i++) {
                 prof_bps += rte_pktmbuf_pkt_len(*(send_buf + real_idx + i)) * 8;
@@ -232,10 +257,29 @@ static void worker_loop(struct traffic_config *t_conf)
 
             pkt->pkt_len = pcap_hdr->len;
             pkt->data_len = pcap_hdr->len;
+            
+            struct rte_ether_hdr *e_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+            if (likely(e_hdr->ether_type == RTE_ETHER_TYPE_IPV4)) {
+                struct rte_ipv4_hdr *ip_hdr = rte_pktmbuf_mtod_offset(pkt, struct rte_ipv4_hdr *, sizeof(struct rte_ether_hdr));
+                switch (ip_hdr->next_proto_id) {
+                    case IPPROTO_TCP:
+                        pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_TCP_CKSUM;
+                        break;
+                    case IPPROTO_UDP:
+                        pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM | PKT_TX_UDP_CKSUM;
+                        break;
+                    default:
+                        pkt->ol_flags = PKT_TX_IPV4 | PKT_TX_IP_CKSUM;
+                }
+            }
             // TODO: mac address
         }
 
         sort_packets(sort_buf, buffer_number, t_conf->pattern);
+        // printf("=======finish sorting=======\n");
+        // for (int i = 0; i < buffer_number; i++)
+        //     debug_print(sort_buf[i]);
+
         // unlock it for the send core
         // TODO: prevent copy if it is slow
         // TODO: extend to multi-core
@@ -244,6 +288,10 @@ static void worker_loop(struct traffic_config *t_conf)
             memcpy(send_buf + real_idx, sort_buf, sizeof(struct rte_mbuf *) * buffer_number);
             
             // printf("[Worker #%u] filling: %d -- %d\n", rte_lcore_id(), real_idx, real_idx + buffer_number);
+            // printf("=======finish copying=======\n");
+            // for (int i = 0; i < buffer_number; i++)
+            //     debug_print(send_buf[i] + real_idx);
+            // fflush(stdout);
         }
         else {
             /* rewind ring buffer */

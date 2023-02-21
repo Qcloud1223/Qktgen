@@ -21,6 +21,7 @@
 #include <rte_ether.h>
 #include <rte_mempool.h>
 #include <rte_cycles.h>
+#include <rte_malloc.h>
 
 #define likely(x)       __builtin_expect(!!(x), 1)
 #define unlikely(x)     __builtin_expect(!!(x), 0)
@@ -85,7 +86,9 @@ struct flow_config
 };
 
 struct rte_mempool *glb_pkt_pool;
+struct rte_eth_dev_tx_buffer *tx_buffer;
 int force_quit;
+uint64_t packet_dropped;
 
 void init_dpdk();
 uint32_t pktgen(struct traffic_config *, struct rte_mbuf **, uint16_t);
