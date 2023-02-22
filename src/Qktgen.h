@@ -76,7 +76,7 @@ struct traffic_config
     uint16_t buffer_time;
     uint64_t seed;
 
-    pcap_t *handle;
+    const char *pcap_path;
     uint16_t buffer_number;
 };
 

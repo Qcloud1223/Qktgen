@@ -83,8 +83,9 @@ static void debug_print(struct rte_mbuf *pkt)
 #define SEND_BUF_SIZE (8*1024)
 static struct rte_mbuf *send_buf[SEND_BUF_SIZE];
 /* counter of sorted packets */
-static volatile uint64_t finish_idx;
+// static volatile uint64_t finish_idx;
 static volatile uint64_t last_tx;
+static volatile uint64_t worker_finish[RTE_MAX_LCORE];
 
 void main_send_loop(struct traffic_config *t_conf)
 {
@@ -122,6 +123,16 @@ void main_send_loop(struct traffic_config *t_conf)
     
 }
 
+/* The packet index that has been finished should be the smallest of all workers */
+static inline uint64_t get_finish_idx(unsigned worker_count)
+{
+    uint64_t ret = UINT64_MAX;
+    for (int i = 0; i < worker_count; i++)
+        if (ret > worker_finish[i])
+            ret = worker_finish[i];
+    return ret;
+}
+
 #define MAX_SEND_BURST 32
 static void sender_loop()
 {
@@ -134,10 +145,13 @@ static void sender_loop()
 
     static uint64_t prof_pps, prof_bps;
     unsigned lcore_id = rte_lcore_id();
+    unsigned worker_count = rte_lcore_count() - 1;
 
+    uint64_t finish_idx;
     printf("lcore#%u entering sender loop\n", lcore_id);
     prev_tsc = rte_rdtsc();
     while (!force_quit) {
+        finish_idx = get_finish_idx(worker_count);
         /* busy waiting for available packets */
         if (last_tx >= finish_idx) {
             continue;
@@ -203,21 +217,58 @@ static void sender_loop()
     }
 }
 
+static inline int in_field(uint64_t packet_idx, unsigned worker_count, unsigned worker_id)
+{
+    unsigned p = SEND_BUF_SIZE / worker_count;
+    unsigned real_idx = packet_idx % SEND_BUF_SIZE;
+    if ((real_idx >= worker_id * p) && (real_idx < (worker_id + 1) * p))
+        return 1;
+    else
+        return 0;
+}
+
 /* read packets and sort them */
 static void worker_loop(struct traffic_config *t_conf)
 {
     unsigned lcore_id = rte_lcore_id();
+    /* Assume one only sender */
+    unsigned worker_count = rte_lcore_count() - 1;
+    if (SEND_BUF_SIZE % worker_count != 0) {
+        printf("WARNING: worker count %u cannot divide buffer size\n", worker_count);
+    }
+    unsigned tmp_idx, worker_idx = 0;
+    RTE_LCORE_FOREACH_WORKER(tmp_idx) {
+        if (tmp_idx == lcore_id)
+            break;
+        worker_idx++;
+    }
+    printf("Lcore id #%u, worker $%u\n", lcore_id, worker_idx);
+
     uint16_t buffer_number = t_conf->buffer_number;
     struct rte_mbuf **sort_buf = malloc(buffer_number * sizeof(struct rte_mbuf *));
-    static uint32_t buf_idx;
     int ret;
     
-    printf("lcore #%u entering worker loop\n", lcore_id);
+    // TODO: one worker could have several discrete send buffer
+    // where a single pair of bounds cannot express
+    uint16_t buf_lb, buf_ub;
+    buf_lb = SEND_BUF_SIZE / worker_count * worker_idx;
+    buf_ub = (worker_idx == worker_count - 1) ? SEND_BUF_SIZE : (buf_lb + SEND_BUF_SIZE / worker_count);
+
+    /* Each worker open their own pcap handle */
+    char errbuf[1000];
+    pcap_t *handle = pcap_open_offline(qktgen_buf.pcap_path, errbuf);
+    if (handle == NULL) {
+        exit(-1);
+    }
+
+    printf("Worker$%u entering worker loop, range: [%u, %u)\n", worker_idx, buf_lb, buf_ub);
     while (!force_quit) {
-        /* Though not that possible, during debug we may run the sender loop real slow.
-           Rewind can only happen when the worker (sorter) is SEND_BUF_SIZE away,
-           AND the sender has finished its own buffer number */
-        if (unlikely(last_tx + SEND_BUF_SIZE - buffer_number <= finish_idx)) {
+        // NB: if not with __thread, each thread will share the same copy
+        static __thread uint64_t pkt_idx;
+        /* Make sure that the worker has not gone too far away from the sender,
+           otherwise it would overwrite the buffer not sent */
+        // if (unlikely(last_tx + SEND_BUF_SIZE - buffer_number <= pkt_idx)) {
+        if (unlikely(pkt_idx + buffer_number >= last_tx + SEND_BUF_SIZE)) {
             rte_delay_us_block(10);
             continue;
         }
@@ -236,11 +287,11 @@ static void worker_loop(struct traffic_config *t_conf)
             const u_char *pkt_data;
             int ret;
         try:
-            ret = pcap_next_ex(t_conf->handle, &pcap_hdr, &pkt_data);
+            ret = pcap_next_ex(handle, &pcap_hdr, &pkt_data);
             /* no more packets to read, maybe open rewind the pcap */
             if (unlikely (ret == PCAP_ERROR_BREAK)) {
                 printf("reaching the end of packet capture!\n");
-                FILE *pcap_fp = pcap_file(t_conf->handle);
+                FILE *pcap_fp = pcap_file(handle);
                 /* FIXME: though runs w/o any problem, we cannot simply assume
                    SEEK_SET points exactly to where pcap_next_ex can recognize.
                    So a better approach should record the offset before any packet is processed. */
@@ -252,6 +303,12 @@ static void worker_loop(struct traffic_config *t_conf)
                 return;
             }
 
+            if (in_field(pkt_idx, worker_count, worker_idx) == 0) {
+                /* This is tricky. We must also mark those ignored packets as finished */
+                worker_finish[worker_idx]++;
+                pkt_idx++;
+                goto try;
+            }
             char *mbuf_data = rte_pktmbuf_mtod(pkt, char *);
             memcpy(mbuf_data, pkt_data, pcap_hdr->len);
 
@@ -273,6 +330,8 @@ static void worker_loop(struct traffic_config *t_conf)
                 }
             }
             // TODO: mac address
+            // printf("Worker$%u finish processing packet $%lu(batch #%d)\n", worker_idx, pkt_idx, i);
+            pkt_idx++;
         }
 
         sort_packets(sort_buf, buffer_number, t_conf->pattern);
@@ -283,8 +342,9 @@ static void worker_loop(struct traffic_config *t_conf)
         // unlock it for the send core
         // TODO: prevent copy if it is slow
         // TODO: extend to multi-core
-        uint16_t real_idx = finish_idx % SEND_BUF_SIZE;
-        if (real_idx + buffer_number < SEND_BUF_SIZE) {
+        uint16_t real_idx = worker_finish[worker_idx] % SEND_BUF_SIZE;
+        /* not reaching upper limit of the worker's own upper bound */
+        if (real_idx + buffer_number < buf_ub) {
             memcpy(send_buf + real_idx, sort_buf, sizeof(struct rte_mbuf *) * buffer_number);
             
             // printf("[Worker #%u] filling: %d -- %d\n", rte_lcore_id(), real_idx, real_idx + buffer_number);
@@ -295,14 +355,14 @@ static void worker_loop(struct traffic_config *t_conf)
         }
         else {
             /* rewind ring buffer */
-            uint32_t remain = SEND_BUF_SIZE - real_idx;
+            uint32_t remain = buf_ub - real_idx;
             memcpy(send_buf + real_idx, sort_buf, sizeof(struct rte_mbuf *) * remain);
-            memcpy(send_buf, sort_buf + remain, sizeof(struct rte_mbuf *) * (buffer_number - remain));
+            memcpy(send_buf + buf_lb, sort_buf + remain, sizeof(struct rte_mbuf *) * (buffer_number - remain));
             
             // printf("[Worker #%u] filling: %d -- %d(rewind)\n", rte_lcore_id(), real_idx, buffer_number-remain);
         }
-        /* finish idx is non-descending */
-        finish_idx += buffer_number;
+        /* this worker finishes another buffer */
+        worker_finish[worker_idx] += buffer_number;
     }
 }
 
@@ -352,14 +412,8 @@ int main(int argc, char *argv[])
         (t_conf.dip_h - t_conf.dip_l + 1) * 
         (t_conf.sport_h - t_conf.sport_l + 1) * 
         (t_conf.dport_h - t_conf.dport_l + 1));
-
-    char errbuf[1000];
-    pcap_t *handle = pcap_open_offline(qktgen_buf.pcap_path, errbuf);
-    if (handle == NULL) {
-        exit(-1);
-    }
     
-    t_conf.handle = handle;
+    t_conf.pcap_path = qktgen_buf.pcap_path;
     // FIXME
     t_conf.buffer_number = 1024;
 
